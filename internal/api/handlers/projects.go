@@ -103,7 +103,6 @@ func (h *ProjectHandler) GetBoard(c *fiber.Ctx) error {
 		return err
 	}
 
-	// Get all issues for the board grouped by status
 	filter := models.IssueFilter{
 		ProjectID: &id,
 		Limit:     200, // board shows all issues

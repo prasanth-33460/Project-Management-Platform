@@ -11,7 +11,7 @@ import (
 
 const UserIDKey = "userID"
 
-// Auth extracts and validates the JWT, injecting the user ID into Fiber locals.
+// Auth validates the JWT and stores the user ID in Fiber locals.
 func Auth(authSvc *service.AuthService) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		header := c.Get("Authorization")

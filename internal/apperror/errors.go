@@ -2,7 +2,7 @@ package apperror
 
 import "fmt"
 
-// AppError is a domain error that carries an HTTP status code.
+// AppError carries an HTTP status code alongside the error message.
 type AppError struct {
 	Code    int         `json:"-"`
 	Message string      `json:"message"`
@@ -21,7 +21,6 @@ func WithDetails(code int, message string, details interface{}) *AppError {
 	return &AppError{Code: code, Message: message, Details: details}
 }
 
-// Common sentinel errors
 var (
 	ErrNotFound     = New(404, "resource not found")
 	ErrUnauthorized = New(401, "unauthorized")

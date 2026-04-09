@@ -135,7 +135,7 @@ func (h *SprintHandler) MoveIssue(c *fiber.Ctx) error {
 	if err := validateStruct(req); err != nil {
 		return err
 	}
-	// Override sprint ID from URL
+	// override sprint ID from URL
 	req.SprintID = &sprintID
 	userID := middleware.CurrentUser(c)
 	if err := h.svc.MoveIssue(c.Context(), &req, userID); err != nil {
@@ -144,7 +144,7 @@ func (h *SprintHandler) MoveIssue(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"moved": true})
 }
 
-// POST /api/sprints/move-to-backlog  (sprint_id in body is nil)
+// POST /api/sprints/move-to-backlog
 func (h *SprintHandler) MoveToBacklog(c *fiber.Ctx) error {
 	var req models.MoveIssueRequest
 	if err := c.BodyParser(&req); err != nil {

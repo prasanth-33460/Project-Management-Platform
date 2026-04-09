@@ -21,7 +21,6 @@ import (
 )
 
 func main() {
-	// ── Structured logging ────────────────────────────────────────────────────
 	logHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})
@@ -35,7 +34,6 @@ func main() {
 		"port", cfg.Port,
 	)
 
-	// ── Database ──────────────────────────────────────────────────────────────
 	db, err := repository.NewDB(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("database connect failed", "error", err)
@@ -44,12 +42,11 @@ func main() {
 	defer db.Close()
 	slog.Info("database connected")
 
-	// Auto-migrate on startup — idempotent, skipped if schema already exists.
+	// auto-migrate on startup — skipped if schema already exists
 	if err := repository.RunMigrations(ctx, db, "migrations/000001_init.up.sql"); err != nil {
 		slog.Warn("migration skipped or failed", "error", err)
 	}
 
-	// ── Redis ─────────────────────────────────────────────────────────────────
 	rdb := repository.NewRedis(cfg.RedisURL)
 	defer func() {
 		if err := rdb.Close(); err != nil {
@@ -58,20 +55,16 @@ func main() {
 	}()
 	slog.Info("redis connected")
 
-	// ── Repositories ──────────────────────────────────────────────────────────
 	repos := repository.NewRepositories(db)
 
-	// ── WebSocket Hub (Redis Pub/Sub fan-out) ─────────────────────────────────
 	hub := wshandler.NewHub(rdb)
 	go hub.Run(ctx)
 
-	// ── Services ──────────────────────────────────────────────────────────────
 	svcs := service.NewServices(repos, hub, cfg)
 
-	// ── Fiber App ─────────────────────────────────────────────────────────────
 	app := fiber.New(fiber.Config{
 		ErrorHandler:          handlers.ErrorHandler,
-		DisableStartupMessage: true, // we log startup ourselves
+		DisableStartupMessage: true,
 	})
 
 	app.Use(recover.New(recover.Config{EnableStackTrace: cfg.Env != "production"}))
@@ -84,7 +77,7 @@ func main() {
 		AllowHeaders: "Origin,Content-Type,Accept,Authorization",
 	}))
 
-	// Health check — no auth required, used by Docker healthcheck + load balancers.
+	// health check — no auth, used by Docker healthcheck and load balancers
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"status":  "ok",
@@ -92,11 +85,9 @@ func main() {
 		})
 	})
 
-	// API v1
 	api := app.Group("/api")
 	handlers.RegisterRoutes(api, svcs, repos, hub)
 
-	// ── Start listening ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	slog.Info("server listening", "addr", addr)
 
@@ -107,7 +98,6 @@ func main() {
 		}
 	}()
 
-	// ── Graceful shutdown on SIGINT / SIGTERM ─────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

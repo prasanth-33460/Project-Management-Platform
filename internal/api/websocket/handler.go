@@ -16,8 +16,7 @@ const (
 	writeTimeout = 10 * time.Second
 )
 
-// Upgrade is the Fiber middleware that gates the WebSocket upgrade.
-// Must be placed before the gows.New() handler.
+// Upgrade gates the WebSocket upgrade. Must come before gows.New().
 func Upgrade(c *fiber.Ctx) error {
 	if gows.IsWebSocketUpgrade(c) {
 		return c.Next()
@@ -25,19 +24,13 @@ func Upgrade(c *fiber.Ctx) error {
 	return fiber.ErrUpgradeRequired
 }
 
-// Handler wraps the Hub and drives individual WebSocket connections.
+// Handler drives individual WebSocket connections.
 type Handler struct{ hub *Hub }
 
 func NewHandler(hub *Hub) *Handler { return &Handler{hub: hub} }
 
 // Handle is the gofiber/websocket entry point.
-//
-// Query params:
-//   - user_id    (UUID, required)
-//   - project_id (subscribes to project board room)
-//   - issue_id   (subscribes to a specific issue room, optional)
-//
-// At least one of project_id or issue_id is required.
+// Query params: user_id (required), project_id, issue_id (at least one room required).
 func (h *Handler) Handle(c *gows.Conn) {
 	userIDStr := c.Query("user_id")
 	projectID := c.Query("project_id")
@@ -76,7 +69,7 @@ func (h *Handler) Handle(c *gows.Conn) {
 		h.broadcastPresence(projectID)
 	}
 
-	// Write pump: drains client.send channel onto the WebSocket connection.
+	// write pump: drains client.send onto the connection
 	go func() {
 		for msg := range client.send {
 			if err := c.WriteMessage(1, msg); err != nil {
@@ -86,7 +79,7 @@ func (h *Handler) Handle(c *gows.Conn) {
 		}
 	}()
 
-	// Read pump: heartbeat handling, presence renewal, and deadline extension.
+	// read pump: handles heartbeats and extends deadlines
 	if err := c.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
 		slog.Warn("ws: set read deadline failed", "user_id", userIDStr, "error", err)
 	}
@@ -104,8 +97,7 @@ func (h *Handler) Handle(c *gows.Conn) {
 	for {
 		msgType, msg, err := c.ReadMessage()
 		if err != nil {
-			// Normal close or network error — exit cleanly.
-			break
+			break // normal close or network error
 		}
 		if msgType != 1 {
 			continue // ignore binary frames

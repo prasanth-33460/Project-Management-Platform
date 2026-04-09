@@ -8,15 +8,15 @@ import (
 	"github.com/prasanth-33460/Project-Management-Platform/internal/apperror"
 )
 
-// ErrorHandler is a centralized Fiber error handler.
+// ErrorHandler is the centralized Fiber error handler.
 func ErrorHandler(c *fiber.Ctx, err error) error {
-	// AppError: domain errors with explicit HTTP codes
+	// domain errors with explicit HTTP codes
 	var appErr *apperror.AppError
 	if errors.As(err, &appErr) {
 		return c.Status(appErr.Code).JSON(appErr)
 	}
 
-	// Validation errors from go-playground/validator
+	// go-playground/validator errors
 	var validationErrs validator.ValidationErrors
 	if errors.As(err, &validationErrs) {
 		fields := make(map[string]string, len(validationErrs))
@@ -35,6 +35,6 @@ func ErrorHandler(c *fiber.Ctx, err error) error {
 		return c.Status(fiberErr.Code).JSON(fiber.Map{"message": fiberErr.Message})
 	}
 
-	// Unexpected error — don't leak internals
+	// don't leak internals
 	return c.Status(500).JSON(fiber.Map{"message": "internal server error"})
 }

@@ -11,16 +11,15 @@ import (
 
 // RegisterRoutes wires all API routes onto the given Fiber router group.
 func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.Repositories, hub *wshandler.Hub) {
-	// --- Auth (public) ---
+	// auth (public)
 	authH := NewAuthHandler(svcs.Auth)
 	authGrp := api.Group("/auth")
 	authGrp.Post("/register", authH.Register)
 	authGrp.Post("/login", authH.Login)
 
-	// Authenticated middleware
 	authMW := middleware.Auth(svcs.Auth)
 
-	// --- Projects ---
+	// projects
 	projectH := NewProjectHandler(svcs.Project, svcs.Issue)
 	sprintH := NewSprintHandler(svcs.Sprint)
 	wfH := NewWorkflowHandler(repos.Workflow)
@@ -42,7 +41,7 @@ func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.
 	projects.Post("/:id/workflow/transitions", wfH.CreateTransition)
 	projects.Delete("/:id/workflow/transitions/:transitionId", wfH.DeleteTransition)
 
-	// --- Issues ---
+	// issues
 	issueH := NewIssueHandler(svcs.Issue, svcs.Workflow)
 	commentH := NewCommentHandler(svcs.Collaboration)
 
@@ -56,12 +55,12 @@ func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.
 	issues.Get("/:id/comments", commentH.List)
 	issues.Post("/:id/comments", commentH.Create)
 
-	// --- Comments ---
+	// comments
 	comments := api.Group("/comments", authMW)
 	comments.Patch("/:id", commentH.Update)
 	comments.Delete("/:id", commentH.Delete)
 
-	// --- Sprints ---
+	// sprints
 	sprints := api.Group("/sprints", authMW)
 	sprints.Get("/:id", sprintH.GetByID)
 	sprints.Patch("/:id", sprintH.Update)
@@ -71,18 +70,18 @@ func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.
 	sprints.Post("/:id/move-issue", sprintH.MoveIssue)
 	sprints.Post("/move-to-backlog", sprintH.MoveToBacklog)
 
-	// --- Search ---
+	// search
 	searchH := NewSearchHandler(svcs.Issue)
 	api.Get("/search", authMW, searchH.Search)
 
-	// --- Notifications ---
+	// notifications
 	notifH := NewNotificationHandler(svcs.Notification)
 	notifs := api.Group("/notifications", authMW)
 	notifs.Get("", notifH.List)
 	notifs.Post("/read-all", notifH.MarkAllRead)
 	notifs.Post("/:id/read", notifH.MarkRead)
 
-	// --- WebSocket  (ws://<host>/api/ws?user_id=...&project_id=...) ---
+	// WebSocket: ws://<host>/api/ws?user_id=...&project_id=...
 	wsH := wshandler.NewHandler(hub)
 	api.Get("/ws", wshandler.Upgrade, gows.New(wsH.Handle))
 }
