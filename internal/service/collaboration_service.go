@@ -15,7 +15,7 @@ import (
 
 var mentionRegex = regexp.MustCompile(`@([a-zA-Z0-9._-]+)`)
 
-// CollaborationService handles threaded comments, @mention detection, and watcher auto-subscribe.
+// CollaborationService manages threaded comments, @mention notifications, and watcher auto-subscribe.
 type CollaborationService struct {
 	comments repository.CommentStore
 	issues   repository.IssueStore
@@ -78,7 +78,6 @@ func (s *CollaborationService) AddComment(
 		slog.WarnContext(ctx, "activity log failed on comment", "issue_id", issueID, "error", err)
 	}
 
-	// auto-watch the commenter
 	if err := s.issues.AddWatcher(ctx, issueID, authorID); err != nil {
 		slog.WarnContext(ctx, "auto-watch commenter failed", "issue_id", issueID, "user_id", authorID, "error", err)
 	}
@@ -137,17 +136,17 @@ func (s *CollaborationService) notifyComment(
 		notified[wid] = true
 	}
 
-	// resolve @mentions and notify those users (skip anyone already notified as a watcher)
+	// @mentioned users get a separate notification unless they already got one as a watcher
 	for _, m := range mentionRegex.FindAllStringSubmatch(comment.Body, -1) {
 		if len(m) < 2 {
 			continue
 		}
 		mentioned, err := s.users.GetByHandle(ctx, m[1])
 		if err != nil || mentioned == nil {
-			continue // unknown handle — silently skip
+			continue
 		}
 		if mentioned.ID == authorID || notified[mentioned.ID] {
-			continue // already got a watcher notification
+			continue
 		}
 		n := &models.Notification{
 			UserID:  mentioned.ID,

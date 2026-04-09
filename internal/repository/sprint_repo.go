@@ -11,7 +11,6 @@ import (
 	"github.com/prasanth-33460/Project-Management-Platform/internal/models"
 )
 
-
 type SprintRepository struct{ db *DB }
 
 func NewSprintRepository(db *DB) *SprintRepository { return &SprintRepository{db: db} }
@@ -79,7 +78,7 @@ func (r *SprintRepository) Update(ctx context.Context, id uuid.UUID, req *models
 		id, req.Name, req.Goal, flexDatePtr(req.StartDate), flexDatePtr(req.EndDate)))
 }
 
-// flexDatePtr converts *FlexDate to *time.Time; returns nil when d is nil so pgx sends NULL.
+// flexDatePtr converts *FlexDate to *time.Time; nil in means NULL out.
 func flexDatePtr(d *models.FlexDate) *time.Time {
 	if d == nil {
 		return nil

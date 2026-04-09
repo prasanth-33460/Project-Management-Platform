@@ -16,7 +16,8 @@ type IssueRepository struct{ db *DB }
 
 func NewIssueRepository(db *DB) *IssueRepository { return &IssueRepository{db: db} }
 
-// issueSelectCols is the full SELECT projection for issue rows, including joined status, assignee, and reporter.
+// issueSelectCols is the SELECT projection shared by all issue queries.
+// Includes the joined status, assignee, and reporter so callers never need a second round-trip.
 const issueSelectCols = `
 	i.id, i.project_id, i.issue_key, i.sprint_id, i.parent_id,
 	i.type, i.title, i.description, i.status_id,
@@ -32,7 +33,7 @@ const issueJoins = `
 	LEFT JOIN users a          ON a.id   = i.assignee_id
 	LEFT JOIN users rp         ON rp.id  = i.reporter_id`
 
-// scanIssue reads a single issue row. Works with both pgx.Row and pgx.Rows.
+// scanIssue is compatible with both pgx.Row and pgx.Rows.
 func scanIssue(row pgx.Row) (*models.Issue, error) {
 	issue := &models.Issue{
 		Status:   &models.WorkflowStatus{},
@@ -112,7 +113,7 @@ func (r *IssueRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Is
 	return issue, nil
 }
 
-// Update patches an issue. Status changes must go through WorkflowEngine — status_id is excluded here.
+// Update patches mutable issue fields. Status changes must go through WorkflowEngine.
 func (r *IssueRepository) Update(ctx context.Context, id uuid.UUID, req *models.UpdateIssueRequest) (*models.Issue, error) {
 	setClauses := []string{"updated_at = NOW()", "version = version + 1"}
 	args := []any{id}
@@ -161,7 +162,6 @@ func (r *IssueRepository) Update(ctx context.Context, id uuid.UUID, req *models.
 	return r.GetByID(ctx, id)
 }
 
-// Delete removes an issue; children are cleaned up via ON DELETE CASCADE.
 func (r *IssueRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	if _, err := r.db.Exec(ctx, `DELETE FROM issues WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("delete issue %s: %w", id, err)
@@ -169,9 +169,9 @@ func (r *IssueRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// List runs a filtered, cursor-paginated query.
-// Full-text search uses the pre-computed tsvector GIN index on search_vector.
-// The tsquery arg is reused for both the WHERE predicate and ORDER BY ts_rank.
+// List runs a filtered, cursor-paginated query with optional full-text search.
+// When f.Query is set, it matches against the tsvector GIN index on issues
+// AND against comment bodies, then ranks by ts_rank.
 func (r *IssueRepository) List(ctx context.Context, f models.IssueFilter) ([]*models.Issue, int, error) {
 	where := []string{"1=1"}
 	args := []any{}
@@ -209,7 +209,6 @@ func (r *IssueRepository) List(ctx context.Context, f models.IssueFilter) ([]*mo
 		idx++
 	}
 	if f.Query != "" {
-		// match issues directly or issues that have a comment containing the query
 		where = append(where, fmt.Sprintf(`(
 			i.search_vector @@ plainto_tsquery('english', $%d)
 			OR EXISTS (
@@ -223,7 +222,7 @@ func (r *IssueRepository) List(ctx context.Context, f models.IssueFilter) ([]*mo
 		idx++
 	}
 
-	// snapshot before cursor clause so count query is unaffected by pagination
+	// snapshot the WHERE args before adding the cursor so total count stays stable across pages
 	countWhere := make([]string, len(where))
 	copy(countWhere, where)
 	countArgs := make([]any, len(args))
@@ -242,7 +241,6 @@ func (r *IssueRepository) List(ctx context.Context, f models.IssueFilter) ([]*mo
 		limit = models.DefaultPageSize
 	}
 
-	// count without cursor so total is stable across pages
 	var total int
 	if err := r.db.QueryRow(ctx,
 		fmt.Sprintf(`SELECT COUNT(*) FROM issues i WHERE %s`, strings.Join(countWhere, " AND ")),
@@ -250,7 +248,6 @@ func (r *IssueRepository) List(ctx context.Context, f models.IssueFilter) ([]*mo
 		slog.WarnContext(ctx, "issue count query failed", "error", err)
 	}
 
-	// rank by relevance when searching, otherwise newest-first
 	orderBy := "i.created_at DESC, i.id DESC"
 	if f.Query != "" {
 		orderBy = fmt.Sprintf(
@@ -279,7 +276,6 @@ func (r *IssueRepository) List(ctx context.Context, f models.IssueFilter) ([]*mo
 	return issues, total, rows.Err()
 }
 
-// GetBacklog returns issues with no sprint assigned, ordered newest first.
 func (r *IssueRepository) GetBacklog(ctx context.Context, projectID uuid.UUID) ([]*models.Issue, error) {
 	rows, err := r.db.Query(ctx,
 		`SELECT `+issueSelectCols+issueJoins+
@@ -334,7 +330,6 @@ func (r *IssueRepository) GetWatchers(ctx context.Context, issueID uuid.UUID) ([
 	return ids, rows.Err()
 }
 
-// AddWatcher subscribes a user to an issue. Idempotent.
 func (r *IssueRepository) AddWatcher(ctx context.Context, issueID, userID uuid.UUID) error {
 	_, err := r.db.Exec(ctx,
 		`INSERT INTO watchers (issue_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
@@ -355,8 +350,8 @@ func (r *IssueRepository) RemoveWatcher(ctx context.Context, issueID, userID uui
 	return nil
 }
 
-// LogActivity inserts an audit entry outside a transaction.
-// Use TxStore.LogActivity when inside a transaction.
+// LogActivity writes an audit entry outside a transaction.
+// Inside a transaction, use TxStore.LogActivity instead.
 func (r *IssueRepository) LogActivity(ctx context.Context, entry *models.ActivityLog) error {
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO activity_log
@@ -419,7 +414,6 @@ func (r *IssueRepository) GetActivityFeed(ctx context.Context, projectID uuid.UU
 	return logs, total, rows.Err()
 }
 
-// Pool exposes the underlying connection pool so the Transactor can open transactions.
 func (r *IssueRepository) Pool() *Database { return r.db }
 
 func collectIssueRows(rows pgx.Rows) ([]*models.Issue, error) {

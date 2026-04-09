@@ -22,7 +22,8 @@ type UserRepository struct{ db *DB }
 
 func NewUserRepository(db *DB) *UserRepository { return &UserRepository{db: db} }
 
-// Create inserts a new user, auto-deriving a unique @mention handle from display_name.
+// Create inserts a new user and derives a unique @mention handle from the display name.
+// On a handle collision (rare) it retries up to 5 times with a random 4-digit suffix.
 func (r *UserRepository) Create(ctx context.Context, email, displayName, passwordHash string) (*models.User, error) {
 	handle := deriveHandle(displayName)
 
@@ -43,10 +44,8 @@ func (r *UserRepository) Create(ctx context.Context, email, displayName, passwor
 		if err == nil {
 			return u, nil
 		}
-
-		// if it's a unique violation on the handle, try a different suffix
 		if strings.Contains(err.Error(), "idx_users_handle") || strings.Contains(err.Error(), "users_handle") {
-			continue
+			continue // handle collision — retry with new suffix
 		}
 		return nil, err
 	}
@@ -77,7 +76,6 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 	return u, err
 }
 
-// GetByHandle looks up a user by their @mention handle.
 func (r *UserRepository) GetByHandle(ctx context.Context, handle string) (*models.User, error) {
 	u := &models.User{}
 	err := r.db.QueryRow(ctx, `
@@ -110,14 +108,14 @@ func (r *UserRepository) ListByIDs(ctx context.Context, ids []uuid.UUID) ([]*mod
 	return users, rows.Err()
 }
 
-// deriveHandle converts a display name into a lowercase handle-safe string.
+// deriveHandle normalises a display name into a lowercase @mention-safe string.
 func deriveHandle(displayName string) string {
 	h := strings.ToLower(strings.TrimSpace(displayName))
 	h = strings.ReplaceAll(h, " ", "_")
 	h = handleNonAlnum.ReplaceAllString(h, "")
 	h = handleMulti.ReplaceAllString(h, "_")
 	h = strings.Trim(h, "_.")
-	if len(h) > 46 { // leave room for "_9999" suffix
+	if len(h) > 46 { // leave room for a "_9999" collision suffix
 		h = h[:46]
 	}
 	if h == "" {

@@ -6,7 +6,7 @@ import (
 	"github.com/prasanth-33460/Project-Management-Platform/internal/repository"
 )
 
-// Services is the top-level container for all domain services.
+// Services is the top-level container wired up in main and passed to the HTTP layer.
 type Services struct {
 	Auth          *AuthService
 	Project       *ProjectService
@@ -18,7 +18,6 @@ type Services struct {
 	CustomField   *CustomFieldService
 }
 
-// NewServices wires all services against the provided repositories, WebSocket hub, and config.
 func NewServices(repos *repository.Repositories, hub *websocket.Hub, cfg *config.Config) *Services {
 	auth := NewAuthService(repos.User, cfg.JWTSecret)
 	project := NewProjectService(repos.Project, repos.Workflow, repos.User)

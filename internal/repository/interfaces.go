@@ -13,10 +13,6 @@ import (
 	"github.com/prasanth-33460/Project-Management-Platform/internal/models"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Store interfaces
-// ─────────────────────────────────────────────────────────────────────────────
-
 // UserStore defines all user persistence operations.
 type UserStore interface {
 	Create(ctx context.Context, email, displayName, passwordHash string) (*models.User, error)
@@ -115,29 +111,17 @@ type CustomFieldStore interface {
 	GetValues(ctx context.Context, issueID uuid.UUID) ([]*models.CustomFieldValue, error)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Transaction abstraction
-// ─────────────────────────────────────────────────────────────────────────────
-
-// TxStore provides the subset of persistence operations that must execute within
-// a single database transaction. Services receive this interface inside a WithTx
-// callback — they never interact with pgx.Tx directly.
+// TxStore is the write surface available inside a database transaction.
+// Services never touch pgx.Tx directly — they receive this interface from WithTx.
 type TxStore interface {
-	// UpdateIssueStatus applies an optimistic-locked status transition.
-	// Returns the number of rows affected (0 means a concurrent writer changed the version).
+	// UpdateIssueStatus does an optimistic-locked status swap.
+	// Returns 0 rows affected when a concurrent writer already bumped the version.
 	UpdateIssueStatus(ctx context.Context, issueID, statusID uuid.UUID, version int) (rowsAffected int64, err error)
-
-	// UpdateIssueSprint moves an issue to a sprint (nil = backlog).
 	UpdateIssueSprint(ctx context.Context, issueID uuid.UUID, sprintID *uuid.UUID) error
-
-	// LogActivity appends an immutable audit entry.
 	LogActivity(ctx context.Context, entry *models.ActivityLog) error
 }
 
-// Transactor provides atomic, ACID-compliant execution of a TxFunc.
-// Implementations must roll back on any error and commit only on success.
+// Transactor wraps multi-step writes in a single ACID transaction.
 type Transactor interface {
-	// WithTx begins a transaction, executes fn, and commits.
-	// If fn returns a non-nil error, the transaction is rolled back.
 	WithTx(ctx context.Context, fn func(ctx context.Context, tx TxStore) error) error
 }

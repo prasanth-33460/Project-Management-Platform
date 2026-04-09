@@ -12,9 +12,9 @@ import (
 	"github.com/prasanth-33460/Project-Management-Platform/internal/repository"
 )
 
-// WorkflowEngine handles status transitions with optimistic locking.
-// The status update and activity log are committed together; WS broadcast and
-// watcher notifications fire after a successful commit.
+// WorkflowEngine enforces the project's transition graph and validation rules
+// before committing status changes. Status update + audit log commit atomically;
+// WS broadcast and watcher notifications fire after the commit.
 type WorkflowEngine struct {
 	issues    repository.IssueStore
 	workflows repository.WorkflowStore
@@ -39,9 +39,8 @@ func NewWorkflowEngine(
 	}
 }
 
-// Transition moves an issue to a new status.
-// Returns 422 with allowed transitions if the target isn't reachable from current status.
-// Returns 409 if a concurrent writer changed the version between our read and write.
+// Transition validates and applies a status change. Rejects with 422 if the target
+// isn't in the transition graph or a validation rule blocks it; 409 on version conflict.
 func (e *WorkflowEngine) Transition(
 	ctx context.Context,
 	issueID uuid.UUID,
@@ -91,7 +90,6 @@ func (e *WorkflowEngine) Transition(
 		newStatusName = transition.ToStatus.Name
 	}
 
-	// status update + activity log in one transaction
 	var rowsAffected int64
 	if err := e.tx.WithTx(ctx, func(ctx context.Context, txStore repository.TxStore) error {
 		rows, err := txStore.UpdateIssueStatus(ctx, issueID, req.TargetStatusID, issue.Version)
@@ -101,8 +99,7 @@ func (e *WorkflowEngine) Transition(
 		rowsAffected = rows
 
 		if rows == 0 {
-			// optimistic lock lost — caller returns 409
-			return nil
+			return nil // version mismatch — optimistic lock lost
 		}
 
 		return txStore.LogActivity(ctx, &models.ActivityLog{
@@ -127,7 +124,6 @@ func (e *WorkflowEngine) Transition(
 		return nil, err
 	}
 
-	// best-effort post-commit actions (e.g. auto-assign field)
 	e.executeAutoActions(ctx, updated, transition, actorID)
 
 	e.hub.Broadcast("project:"+issue.ProjectID.String(), &websocket.Event{
@@ -150,9 +146,8 @@ func (e *WorkflowEngine) Transition(
 	return updated, nil
 }
 
-// executeAutoActions runs transition auto_actions after commit.
-// Failures are logged and swallowed — don't abort for this.
-// Currently supports: assign_field → sets assignee_id.
+// executeAutoActions runs any auto_actions declared on a transition after the commit.
+// Only "assign_field" on "assignee_id" is supported; failures are logged and ignored.
 func (e *WorkflowEngine) executeAutoActions(
 	ctx context.Context,
 	issue *models.Issue,
@@ -194,7 +189,7 @@ func (e *WorkflowEngine) notifyWatchers(
 	refType := "issue"
 	for _, watcherID := range watchers {
 		if watcherID == actorID {
-			continue // skip if actor is watching — no point notifying yourself
+			continue
 		}
 		n := &models.Notification{
 			UserID:  watcherID,
@@ -210,7 +205,7 @@ func (e *WorkflowEngine) notifyWatchers(
 	}
 }
 
-// checkValidationRules returns a 422 if any rule fails against the current issue state.
+// checkValidationRules blocks the transition if the issue doesn't satisfy all declared rules.
 func checkValidationRules(issue *models.Issue, rules []models.ValidationRule) error {
 	for _, r := range rules {
 		msg := r.Message

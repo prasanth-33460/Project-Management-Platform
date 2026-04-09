@@ -103,7 +103,8 @@ func (s *SprintService) Start(ctx context.Context, id uuid.UUID) (*models.Sprint
 	return sprint, nil
 }
 
-// Complete closes the sprint, calculates velocity, and atomically moves carry-over issues.
+// Complete closes the sprint. It totals up completed story points as velocity,
+// then atomically moves any incomplete issues to either the next sprint or backlog.
 func (s *SprintService) Complete(
 	ctx context.Context,
 	id uuid.UUID,
@@ -136,14 +137,13 @@ func (s *SprintService) Complete(
 		carrySet[cid] = true
 	}
 
-	// atomically move carry-over / backlog issues
 	if err := s.tx.WithTx(ctx, func(ctx context.Context, txStore repository.TxStore) error {
 		for _, issue := range incomplete {
 			var target *uuid.UUID
 			if carrySet[issue.ID] {
-				target = req.NextSprintID // nil means backlog
+				target = req.NextSprintID // nil → backlog
 			}
-			// issues not in carrySet go straight to backlog
+			// issues not explicitly listed for carry-over always go to backlog
 
 			if err := txStore.UpdateIssueSprint(ctx, issue.ID, target); err != nil {
 				return fmt.Errorf("move issue %s: %w", issue.ID, err)
@@ -162,8 +162,8 @@ func (s *SprintService) Complete(
 				OldValue:  strPtr(id.String()),
 				NewValue:  strPtr(newVal),
 			}); err != nil {
-				// best-effort, don't abort carry-over for a failed log
-				slog.WarnContext(ctx, "activity log failed during sprint complete",
+				// non-fatal — a failed audit entry shouldn't roll back the carry-over
+				slog.WarnContext(ctx, "carry-over activity log failed",
 					"issue_id", issue.ID, "error", err)
 			}
 		}
@@ -200,7 +200,6 @@ func (s *SprintService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.sprints.Delete(ctx, id)
 }
 
-// MoveIssue atomically reassigns an issue to a sprint (or backlog) and logs the event.
 func (s *SprintService) MoveIssue(ctx context.Context, req *models.MoveIssueRequest, actorID uuid.UUID) error {
 	issue, err := s.issues.GetByID(ctx, req.IssueID)
 	if err != nil {

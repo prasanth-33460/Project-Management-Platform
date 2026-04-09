@@ -10,7 +10,7 @@ import (
 	"github.com/prasanth-33460/Project-Management-Platform/internal/repository"
 )
 
-// ProjectService handles project lifecycle and board assembly.
+// ProjectService manages project CRUD and seeds the default workflow on creation.
 type ProjectService struct {
 	projects  repository.ProjectStore
 	workflows repository.WorkflowStore
@@ -37,7 +37,7 @@ func (s *ProjectService) Create(ctx context.Context, req *models.CreateProjectRe
 		return nil, err
 	}
 
-	// seed default workflow: To Do → In Progress → In Review → Done
+	// every new project gets these four statuses and the standard transition paths
 	defaultStatuses := []models.CreateStatusRequest{
 		{Name: "To Do", Color: "#6B7280", Position: 0, IsDefault: true, IsDone: false},
 		{Name: "In Progress", Color: "#3B82F6", Position: 1, IsDefault: false, IsDone: false},
@@ -54,7 +54,6 @@ func (s *ProjectService) Create(ctx context.Context, req *models.CreateProjectRe
 		statusIDs[i] = st.ID
 	}
 
-	// seed transitions, including backward paths for revert
 	transitions := [][2]int{
 		{0, 1}, // To Do       → In Progress
 		{1, 2}, // In Progress → In Review

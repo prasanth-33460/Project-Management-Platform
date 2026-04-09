@@ -95,11 +95,10 @@ func (s *IssueService) Create(ctx context.Context, projectID uuid.UUID, req *mod
 		return nil, err
 	}
 
-	// auto-watch the reporter
 	if err := s.issues.AddWatcher(ctx, created.ID, reporterID); err != nil {
 		slog.WarnContext(ctx, "auto-watch reporter failed", "issue_id", created.ID, "user_id", reporterID, "error", err)
 	}
-	// auto-watch the assignee if different from reporter
+	// assignee gets auto-watched too, but only if they're someone other than the reporter
 	if req.AssigneeID != nil && *req.AssigneeID != reporterID {
 		if err := s.issues.AddWatcher(ctx, created.ID, *req.AssigneeID); err != nil {
 			slog.WarnContext(ctx, "auto-watch assignee failed", "issue_id", created.ID, "user_id", req.AssigneeID, "error", err)
@@ -275,7 +274,8 @@ func (s *IssueService) GetActivityFeed(ctx context.Context, projectID uuid.UUID,
 	}, nil
 }
 
-// validateParentChild enforces hierarchy rules: epic→story|task|bug, story|task|bug→subtask.
+// validateParentChild enforces the issue hierarchy:
+// epics can contain stories/tasks/bugs; those can contain subtasks; nothing else.
 func validateParentChild(parentType, childType models.IssueType) error {
 	allowed := map[models.IssueType][]models.IssueType{
 		models.IssueTypeEpic:  {models.IssueTypeStory, models.IssueTypeTask, models.IssueTypeBug},
