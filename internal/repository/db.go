@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -50,32 +51,57 @@ func NewRedis(redisURL string) *redis.Client {
 	return redis.NewClient(opts)
 }
 
-// RunMigrations executes the init migration SQL only when the schema has not yet
-// been applied (checked by the presence of the 'users' table). This is a simple
-// idempotent approach appropriate for single-binary deployments; use a proper
-// migration tool (golang-migrate, goose) for multi-version schemas.
-func RunMigrations(ctx context.Context, pool *Database, migrationFile string) error {
-	var exists bool
-	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM information_schema.tables
-			WHERE table_schema = 'public' AND table_name = 'users'
-		)`).Scan(&exists); err != nil {
-		return fmt.Errorf("check migration state: %w", err)
-	}
-	if exists {
-		slog.Info("database already migrated, skipping")
-		return nil
+// RunMigrations applies each SQL file in order, skipping any that have already
+// been recorded in the schema_migrations table. Safe to call on every startup.
+func RunMigrations(ctx context.Context, pool *Database, files ...string) error {
+	// ensure the tracking table exists — idempotent
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			filename   TEXT        PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	sql, err := os.ReadFile(migrationFile)
-	if err != nil {
-		return fmt.Errorf("read migration file %q: %w", migrationFile, err)
+	// Detect bootstrap scenario: if the schema was seeded by postgres initdb.d,
+	// those tables already exist but schema_migrations won't know about them.
+	// We handle this per-file by sniffing for "already exists" errors and marking
+	// them as applied rather than aborting.
+	for _, file := range files {
+		var already bool
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = $1)`, file,
+		).Scan(&already); err != nil {
+			return fmt.Errorf("check migration %q: %w", file, err)
+		}
+		if already {
+			slog.Info("migration already applied, skipping", "file", file)
+			continue
+		}
+
+		sql, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("read migration file %q: %w", file, err)
+		}
+
+		if _, execErr := pool.Exec(ctx, string(sql)); execErr != nil {
+			errMsg := execErr.Error()
+			// postgres returns "already exists" when objects were pre-created (e.g. via initdb.d)
+			if strings.Contains(errMsg, "already exists") {
+				slog.Warn("migration objects already exist (bootstrapped externally), marking applied",
+					"file", file)
+			} else {
+				return fmt.Errorf("execute migration %q: %w", file, execErr)
+			}
+		}
+
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO schema_migrations (filename) VALUES ($1)`, file,
+		); err != nil {
+			return fmt.Errorf("record migration %q: %w", file, err)
+		}
+		slog.Info("migration applied", "file", file)
 	}
-	if _, err := pool.Exec(ctx, string(sql)); err != nil {
-		return fmt.Errorf("execute migration: %w", err)
-	}
-	slog.Info("database migration applied", "file", migrationFile)
 	return nil
 }
 
@@ -174,6 +200,7 @@ type Repositories struct {
 	Workflow     WorkflowStore
 	Comment      CommentStore
 	Notification NotificationStore
+	CustomField  CustomFieldStore
 	Tx           Transactor
 }
 
@@ -187,6 +214,7 @@ func NewRepositories(db *Database) *Repositories {
 		Workflow:     NewWorkflowRepository(db),
 		Comment:      NewCommentRepository(db),
 		Notification: NewNotificationRepository(db),
+		CustomField:  NewCustomFieldRepository(db),
 		Tx:           NewTransactor(db),
 	}
 }

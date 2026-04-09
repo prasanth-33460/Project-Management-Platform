@@ -3,7 +3,10 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -114,7 +117,7 @@ func (h *Hub) fanOut(room string, data []byte) {
 	}
 }
 
-// Broadcast publishes an event to a room via Redis Pub/Sub.
+// Broadcast publishes an event to a room via Redis Pub/Sub and stores it for replay.
 // Room is typically "project:{id}" or "issue:{id}".
 func (h *Hub) Broadcast(room string, event *Event) {
 	data, err := json.Marshal(event)
@@ -126,6 +129,8 @@ func (h *Hub) Broadcast(room string, event *Event) {
 	if err := h.rdb.Publish(ctx, "ws:"+room, data).Err(); err != nil {
 		log.Printf("ws broadcast error: %v", err)
 	}
+	// store for missed-event replay on reconnect
+	h.StoreEvent(room, event)
 }
 
 // SetPresence marks a user as present on a board with a TTL.
@@ -153,6 +158,65 @@ func (h *Hub) GetPresence(ctx context.Context, projectID string) []string {
 		users = append(users, k[len(prefix):])
 	}
 	return users
+}
+
+// storedEvent wraps an Event with a Unix-millisecond timestamp for replay ordering.
+type storedEvent struct {
+	Timestamp int64  `json:"ts"` // Unix ms
+	Event     *Event `json:"event"`
+}
+
+const (
+	replayMaxEvents = 200
+	replayTTL       = time.Hour
+)
+
+// StoreEvent persists an event in a Redis sorted set so late-joining clients can replay it.
+// The score is the current Unix millisecond timestamp, which allows range queries.
+func (h *Hub) StoreEvent(room string, event *Event) {
+	data, err := json.Marshal(&storedEvent{
+		Timestamp: time.Now().UnixMilli(),
+		Event:     event,
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	key := fmt.Sprintf("ws:replay:%s", room)
+	score := float64(time.Now().UnixMilli())
+
+	pipe := h.rdb.Pipeline()
+	pipe.ZAdd(ctx, key, redis.Z{Score: score, Member: string(data)})
+	pipe.ZRemRangeByRank(ctx, key, 0, -replayMaxEvents-1) // keep last 200
+	pipe.Expire(ctx, key, replayTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.Warn("ws: store event failed", "room", room, "error", err)
+	}
+}
+
+// GetEventsSince returns events stored for a room after the given Unix-millisecond timestamp.
+func (h *Hub) GetEventsSince(ctx context.Context, room string, sinceMs int64) ([]*Event, error) {
+	key := fmt.Sprintf("ws:replay:%s", room)
+	// use "(sinceMs" (exclusive) so we don't replay the last-seen event itself
+	members, err := h.rdb.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+		Min: strconv.FormatInt(sinceMs+1, 10),
+		Max: "+inf",
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	events := make([]*Event, 0, len(members))
+	for _, m := range members {
+		var se storedEvent
+		if err := json.Unmarshal([]byte(m), &se); err != nil {
+			continue
+		}
+		events = append(events, se.Event)
+	}
+	return events, nil
 }
 
 func (h *Hub) newClient(userID uuid.UUID, rooms []string) *Client {

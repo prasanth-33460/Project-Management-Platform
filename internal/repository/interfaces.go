@@ -22,6 +22,7 @@ type UserStore interface {
 	Create(ctx context.Context, email, displayName, passwordHash string) (*models.User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
+	GetByHandle(ctx context.Context, handle string) (*models.User, error)
 	ListByIDs(ctx context.Context, ids []uuid.UUID) ([]*models.UserResponse, error)
 }
 
@@ -101,6 +102,17 @@ type NotificationStore interface {
 	MarkRead(ctx context.Context, id, userID uuid.UUID) error
 	MarkAllRead(ctx context.Context, userID uuid.UUID) error
 	UnreadCount(ctx context.Context, userID uuid.UUID) (int, error)
+}
+
+// CustomFieldStore manages per-project field definitions and per-issue values.
+type CustomFieldStore interface {
+	CreateDefinition(ctx context.Context, projectID uuid.UUID, req *models.CreateCustomFieldRequest) (*models.CustomFieldDefinition, error)
+	ListDefinitions(ctx context.Context, projectID uuid.UUID) ([]*models.CustomFieldDefinition, error)
+	GetDefinition(ctx context.Context, id uuid.UUID) (*models.CustomFieldDefinition, error)
+	DeleteDefinition(ctx context.Context, id uuid.UUID) error
+
+	SetValue(ctx context.Context, issueID, fieldID uuid.UUID, value *string) error
+	GetValues(ctx context.Context, issueID uuid.UUID) ([]*models.CustomFieldValue, error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

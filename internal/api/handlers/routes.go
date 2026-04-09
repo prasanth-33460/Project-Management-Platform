@@ -5,6 +5,7 @@ import (
 	gows "github.com/gofiber/websocket/v2"
 	"github.com/prasanth-33460/Project-Management-Platform/internal/api/middleware"
 	wshandler "github.com/prasanth-33460/Project-Management-Platform/internal/api/websocket"
+	"github.com/prasanth-33460/Project-Management-Platform/internal/docs"
 	"github.com/prasanth-33460/Project-Management-Platform/internal/repository"
 	"github.com/prasanth-33460/Project-Management-Platform/internal/service"
 )
@@ -23,6 +24,7 @@ func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.
 	projectH := NewProjectHandler(svcs.Project, svcs.Issue)
 	sprintH := NewSprintHandler(svcs.Sprint)
 	wfH := NewWorkflowHandler(repos.Workflow)
+	cfH := NewCustomFieldHandler(svcs.CustomField)
 
 	projects := api.Group("/projects", authMW)
 	projects.Get("", projectH.List)
@@ -40,6 +42,9 @@ func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.
 	projects.Post("/:id/workflow/statuses", wfH.CreateStatus)
 	projects.Post("/:id/workflow/transitions", wfH.CreateTransition)
 	projects.Delete("/:id/workflow/transitions/:transitionId", wfH.DeleteTransition)
+	projects.Get("/:id/custom-fields", cfH.ListDefinitions)
+	projects.Post("/:id/custom-fields", cfH.CreateDefinition)
+	projects.Delete("/:id/custom-fields/:fieldId", cfH.DeleteDefinition)
 
 	// issues
 	issueH := NewIssueHandler(svcs.Issue, svcs.Workflow)
@@ -54,6 +59,8 @@ func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.
 	issues.Delete("/:id/watch", issueH.Unwatch)
 	issues.Get("/:id/comments", commentH.List)
 	issues.Post("/:id/comments", commentH.Create)
+	issues.Get("/:id/custom-fields", cfH.GetValues)
+	issues.Put("/:id/custom-fields", cfH.SetValues)
 
 	// comments
 	comments := api.Group("/comments", authMW)
@@ -84,4 +91,14 @@ func RegisterRoutes(api fiber.Router, svcs *service.Services, repos *repository.
 	// WebSocket: ws://<host>/api/ws?user_id=...&project_id=...
 	wsH := wshandler.NewHandler(hub)
 	api.Get("/ws", wshandler.Upgrade, gows.New(wsH.Handle))
+
+	// API docs — both files are embedded at compile time, no runtime file I/O
+	api.Get("/docs/openapi.json", func(c *fiber.Ctx) error {
+		c.Set("Content-Type", "application/json")
+		return c.Send(docs.OpenAPIJSON)
+	})
+	api.Get("/docs", func(c *fiber.Ctx) error {
+		c.Set("Content-Type", "text/html; charset=utf-8")
+		return c.Send(docs.SwaggerHTML)
+	})
 }
