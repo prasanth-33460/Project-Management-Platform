@@ -24,13 +24,22 @@ type AutoAction struct {
 	Payload map[string]string `json:"payload"` // extra context
 }
 
+// ValidationRule blocks a transition when a field condition is not met.
+// Operator: "not_empty" | "is_empty"
+type ValidationRule struct {
+	Field    string `json:"field"`    // issue field: "assignee_id", "story_points", "description"
+	Operator string `json:"operator"` // not_empty | is_empty
+	Message  string `json:"message"`  // shown to the user on failure
+}
+
 type WorkflowTransition struct {
-	ID           uuid.UUID       `json:"id"`
-	ProjectID    uuid.UUID       `json:"project_id"`
-	FromStatusID uuid.UUID       `json:"from_status_id"`
-	ToStatusID   uuid.UUID       `json:"to_status_id"`
-	ToStatus     *WorkflowStatus `json:"to_status,omitempty"`
-	AutoActions  []AutoAction    `json:"auto_actions"`
+	ID              uuid.UUID        `json:"id"`
+	ProjectID       uuid.UUID        `json:"project_id"`
+	FromStatusID    uuid.UUID        `json:"from_status_id"`
+	ToStatusID      uuid.UUID        `json:"to_status_id"`
+	ToStatus        *WorkflowStatus  `json:"to_status,omitempty"`
+	AutoActions     []AutoAction     `json:"auto_actions"`
+	ValidationRules []ValidationRule `json:"validation_rules"`
 }
 
 type CreateStatusRequest struct {
@@ -42,9 +51,10 @@ type CreateStatusRequest struct {
 }
 
 type CreateTransitionRequest struct {
-	FromStatusID uuid.UUID    `json:"from_status_id" validate:"required"`
-	ToStatusID   uuid.UUID    `json:"to_status_id"   validate:"required"`
-	AutoActions  []AutoAction `json:"auto_actions"`
+	FromStatusID    uuid.UUID        `json:"from_status_id"    validate:"required"`
+	ToStatusID      uuid.UUID        `json:"to_status_id"      validate:"required"`
+	AutoActions     []AutoAction     `json:"auto_actions"`
+	ValidationRules []ValidationRule `json:"validation_rules"`
 }
 
 type TransitionRequest struct {
