@@ -3,7 +3,9 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
+	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,15 +13,14 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Event is the typed payload broadcast to clients.
 type Event struct {
-	Type    string      `json:"type"`    // issue_created | issue_updated | issue_moved | comment_added | sprint_updated | presence_update
+	Type    string      `json:"type"`
 	Payload interface{} `json:"payload"`
 }
 
-// PresenceInfo is broadcast when users join/leave a board.
+// PresenceInfo is the payload for presence_update events.
 type PresenceInfo struct {
-	BoardID string      `json:"board_id"` // project_id
+	BoardID string      `json:"board_id"`
 	Users   []uuid.UUID `json:"users"`
 }
 
@@ -37,7 +38,7 @@ type registration struct {
 	rooms  []string
 }
 
-// Hub manages all WebSocket clients and pub/sub via Redis.
+// Hub routes broadcast events to in-process WebSocket clients via Redis pub/sub.
 type Hub struct {
 	mu         sync.RWMutex
 	rooms      map[string]map[*Client]bool // room -> set of clients
@@ -57,7 +58,7 @@ func NewHub(rdb *redis.Client) *Hub {
 	}
 }
 
-// Run starts the hub event loop and the Redis subscriber. Call this in a goroutine.
+// Run is the hub event loop. Run it in a goroutine; it stops when ctx is cancelled.
 func (h *Hub) Run(ctx context.Context) {
 	pubsub := h.rdb.PSubscribe(ctx, "ws:*")
 	defer pubsub.Close()
@@ -93,7 +94,7 @@ func (h *Hub) Run(ctx context.Context) {
 			close(client.send)
 
 		case msg := <-msgCh:
-			// msg.Channel is e.g. "ws:project:abc123"; strip the "ws:" prefix
+			// strip the "ws:" prefix from channels like "ws:project:abc123"
 			room := msg.Channel[3:]
 			h.fanOut(room, []byte(msg.Payload))
 		}
@@ -109,13 +110,13 @@ func (h *Hub) fanOut(room string, data []byte) {
 		select {
 		case c.send <- data:
 		default:
-			// slow client — drop rather than block
+			// slow client: drop the message rather than block the hub
 		}
 	}
 }
 
-// Broadcast publishes an event to a room via Redis Pub/Sub.
-// Room is typically "project:{id}" or "issue:{id}".
+// Broadcast publishes to a room ("project:{id}" or "issue:{id}") and stores
+// the event for missed-event replay on reconnect.
 func (h *Hub) Broadcast(room string, event *Event) {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -124,23 +125,21 @@ func (h *Hub) Broadcast(room string, event *Event) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := h.rdb.Publish(ctx, "ws:"+room, data).Err(); err != nil {
-		log.Printf("ws broadcast error: %v", err)
+		slog.Warn("ws: broadcast failed", "room", room, "error", err)
 	}
+	// store for missed-event replay on reconnect
+	h.StoreEvent(room, event)
 }
 
-// SetPresence marks a user as present on a board with a TTL.
 func (h *Hub) SetPresence(ctx context.Context, projectID, userID string) {
-	key := "presence:board:" + projectID + ":" + userID
-	h.rdb.Set(ctx, key, "1", presenceTTL)
+	h.rdb.Set(ctx, "presence:board:"+projectID+":"+userID, "1", presenceTTL)
 }
 
-// RemovePresence clears a user's presence immediately on disconnect.
 func (h *Hub) RemovePresence(ctx context.Context, projectID, userID string) {
-	key := "presence:board:" + projectID + ":" + userID
-	h.rdb.Del(ctx, key)
+	h.rdb.Del(ctx, "presence:board:"+projectID+":"+userID)
 }
 
-// GetPresence returns all users currently viewing a board.
+// GetPresence returns the user IDs of everyone currently viewing the board.
 func (h *Hub) GetPresence(ctx context.Context, projectID string) []string {
 	pattern := "presence:board:" + projectID + ":*"
 	keys, err := h.rdb.Keys(ctx, pattern).Result()
@@ -153,6 +152,62 @@ func (h *Hub) GetPresence(ctx context.Context, projectID string) []string {
 		users = append(users, k[len(prefix):])
 	}
 	return users
+}
+
+type storedEvent struct {
+	Timestamp int64  `json:"ts"`
+	Event     *Event `json:"event"`
+}
+
+const (
+	replayMaxEvents = 200
+	replayTTL       = time.Hour
+)
+
+// StoreEvent persists an event in a Redis sorted set keyed by Unix-ms so clients
+// can replay missed events on reconnect via GetEventsSince.
+func (h *Hub) StoreEvent(room string, event *Event) {
+	now := time.Now().UnixMilli()
+	data, err := json.Marshal(&storedEvent{Timestamp: now, Event: event})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	key := fmt.Sprintf("ws:replay:%s", room)
+	score := float64(now)
+
+	pipe := h.rdb.Pipeline()
+	pipe.ZAdd(ctx, key, redis.Z{Score: score, Member: string(data)})
+	pipe.ZRemRangeByRank(ctx, key, 0, -replayMaxEvents-1) // keep last 200
+	pipe.Expire(ctx, key, replayTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.Warn("ws: store event failed", "room", room, "error", err)
+	}
+}
+
+// GetEventsSince returns all events for a room after sinceMs (exclusive).
+// Used on reconnect to catch up on missed broadcasts.
+func (h *Hub) GetEventsSince(ctx context.Context, room string, sinceMs int64) ([]*Event, error) {
+	key := fmt.Sprintf("ws:replay:%s", room)
+	members, err := h.rdb.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+		Min: strconv.FormatInt(sinceMs+1, 10),
+		Max: "+inf",
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	events := make([]*Event, 0, len(members))
+	for _, m := range members {
+		var se storedEvent
+		if err := json.Unmarshal([]byte(m), &se); err != nil {
+			continue
+		}
+		events = append(events, se.Event)
+	}
+	return events, nil
 }
 
 func (h *Hub) newClient(userID uuid.UUID, rooms []string) *Client {

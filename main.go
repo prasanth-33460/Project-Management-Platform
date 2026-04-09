@@ -42,9 +42,12 @@ func main() {
 	defer db.Close()
 	slog.Info("database connected")
 
-	// auto-migrate on startup — skipped if schema already exists
-	if err := repository.RunMigrations(ctx, db, "migrations/000001_init.up.sql"); err != nil {
-		slog.Warn("migration skipped or failed", "error", err)
+	// auto-migrate on startup — each file is applied at most once
+	if err := repository.RunMigrations(ctx, db,
+		"migrations/000001_init.up.sql",
+		"migrations/000002_enhancements.up.sql",
+	); err != nil {
+		slog.Warn("migration failed", "error", err)
 	}
 
 	rdb := repository.NewRedis(cfg.RedisURL)

@@ -12,7 +12,6 @@ import (
 type ProjectHandler struct {
 	svc      *service.ProjectService
 	issueSvc *service.IssueService
-	wfRepo   interface{} // for workflow endpoint
 }
 
 func NewProjectHandler(svc *service.ProjectService, issueSvc *service.IssueService) *ProjectHandler {

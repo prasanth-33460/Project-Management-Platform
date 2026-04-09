@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -67,6 +68,27 @@ func (h *Handler) Handle(c *gows.Conn) {
 		h.hub.SetPresence(ctx, projectID, userIDStr)
 		defer h.hub.RemovePresence(ctx, projectID, userIDStr)
 		h.broadcastPresence(projectID)
+	}
+
+	// replay any events the client missed since their last connection
+	if sinceStr := c.Query("since"); sinceStr != "" {
+		if sinceMs, err := strconv.ParseInt(sinceStr, 10, 64); err == nil {
+			for _, room := range rooms {
+				missed, err := h.hub.GetEventsSince(ctx, room, sinceMs)
+				if err != nil {
+					slog.Warn("ws: replay fetch failed", "room", room, "error", err)
+					continue
+				}
+				for _, ev := range missed {
+					if data, err := json.Marshal(ev); err == nil {
+						select {
+						case client.send <- data:
+						default:
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// write pump: drains client.send onto the connection

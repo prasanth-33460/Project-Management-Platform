@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,13 +14,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Database / DB are both aliases for the underlying pgx pool.
-// DB is used internally by all repository structs; Database is used in interfaces.
-type Database = pgxpool.Pool
+// DB is the shared alias for the pgx connection pool used across all repositories.
 type DB = pgxpool.Pool
 
-// NewDB creates and validates a PostgreSQL connection pool.
-// It configures sensible production defaults for connection counts and lifetimes.
+// Database is the same type exposed via the IssueStore.Pool() interface method.
+type Database = pgxpool.Pool
+
 func NewDB(ctx context.Context, connString string) (*Database, error) {
 	cfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
@@ -40,7 +40,6 @@ func NewDB(ctx context.Context, connString string) (*Database, error) {
 	return pool, nil
 }
 
-// NewRedis creates a Redis client from a URL string.
 func NewRedis(redisURL string) *redis.Client {
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {
@@ -50,63 +49,75 @@ func NewRedis(redisURL string) *redis.Client {
 	return redis.NewClient(opts)
 }
 
-// RunMigrations executes the init migration SQL only when the schema has not yet
-// been applied (checked by the presence of the 'users' table). This is a simple
-// idempotent approach appropriate for single-binary deployments; use a proper
-// migration tool (golang-migrate, goose) for multi-version schemas.
-func RunMigrations(ctx context.Context, pool *Database, migrationFile string) error {
-	var exists bool
-	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM information_schema.tables
-			WHERE table_schema = 'public' AND table_name = 'users'
-		)`).Scan(&exists); err != nil {
-		return fmt.Errorf("check migration state: %w", err)
-	}
-	if exists {
-		slog.Info("database already migrated, skipping")
-		return nil
+// RunMigrations applies each SQL file in order, skipping files already recorded
+// in schema_migrations. Safe to call on every startup.
+//
+// If postgres initdb.d seeded the schema before the app ran for the first time,
+// the migration SQL will hit "already exists" errors. We treat that as a bootstrap
+// signal — mark the file applied and move on rather than aborting.
+func RunMigrations(ctx context.Context, pool *Database, files ...string) error {
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			filename   TEXT        PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	sql, err := os.ReadFile(migrationFile)
-	if err != nil {
-		return fmt.Errorf("read migration file %q: %w", migrationFile, err)
+	for _, file := range files {
+		var already bool
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = $1)`, file,
+		).Scan(&already); err != nil {
+			return fmt.Errorf("check migration %q: %w", file, err)
+		}
+		if already {
+			slog.Info("migration already applied, skipping", "file", file)
+			continue
+		}
+
+		sql, err := os.ReadFile(file)
+		if err != nil {
+			return fmt.Errorf("read migration file %q: %w", file, err)
+		}
+
+		if _, execErr := pool.Exec(ctx, string(sql)); execErr != nil {
+			if strings.Contains(execErr.Error(), "already exists") {
+				slog.Warn("migration objects already exist, marking applied", "file", file)
+			} else {
+				return fmt.Errorf("execute migration %q: %w", file, execErr)
+			}
+		}
+
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO schema_migrations (filename) VALUES ($1)`, file,
+		); err != nil {
+			return fmt.Errorf("record migration %q: %w", file, err)
+		}
+		slog.Info("migration applied", "file", file)
 	}
-	if _, err := pool.Exec(ctx, string(sql)); err != nil {
-		return fmt.Errorf("execute migration: %w", err)
-	}
-	slog.Info("database migration applied", "file", migrationFile)
 	return nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Transaction support
-// ─────────────────────────────────────────────────────────────────────────────
-
-// dbTransactor implements the Transactor interface using pgxpool.
 type dbTransactor struct{ pool *pgxpool.Pool }
 
-// NewTransactor wraps a pool into a Transactor.
 func NewTransactor(pool *Database) Transactor {
 	return &dbTransactor{pool: pool}
 }
 
-// WithTx begins a transaction, calls fn, and commits.
-// Any error from fn causes an automatic rollback.
 func (t *dbTransactor) WithTx(ctx context.Context, fn func(ctx context.Context, tx TxStore) error) error {
 	pgxTx, err := t.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	// Deferred rollback is a no-op if Commit has already been called.
+	// rollback is a no-op after a successful commit
 	defer func() {
 		if rbErr := pgxTx.Rollback(ctx); rbErr != nil && rbErr != pgx.ErrTxClosed {
 			slog.Error("transaction rollback failed", "error", rbErr)
 		}
 	}()
 
-	txStore := &txRepository{tx: pgxTx}
-	if err := fn(ctx, txStore); err != nil {
+	if err := fn(ctx, &txRepository{tx: pgxTx}); err != nil {
 		return err
 	}
 	if err := pgxTx.Commit(ctx); err != nil {
@@ -115,13 +126,9 @@ func (t *dbTransactor) WithTx(ctx context.Context, fn func(ctx context.Context, 
 	return nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// txRepository — implements TxStore using an in-flight pgx.Tx
-// ─────────────────────────────────────────────────────────────────────────────
-
+// txRepository implements TxStore against an in-flight pgx.Tx.
 type txRepository struct{ tx pgx.Tx }
 
-// UpdateIssueStatus applies an optimistic-locked status change in the current Tx.
 func (r *txRepository) UpdateIssueStatus(ctx context.Context, issueID, statusID uuid.UUID, version int) (int64, error) {
 	tag, err := r.tx.Exec(ctx, `
 		UPDATE issues
@@ -136,7 +143,6 @@ func (r *txRepository) UpdateIssueStatus(ctx context.Context, issueID, statusID 
 	return tag.RowsAffected(), nil
 }
 
-// UpdateIssueSprint moves an issue to the given sprint (nil means backlog) in the current Tx.
 func (r *txRepository) UpdateIssueSprint(ctx context.Context, issueID uuid.UUID, sprintID *uuid.UUID) error {
 	_, err := r.tx.Exec(ctx,
 		`UPDATE issues SET sprint_id = $1, updated_at = NOW() WHERE id = $2`,
@@ -147,7 +153,6 @@ func (r *txRepository) UpdateIssueSprint(ctx context.Context, issueID uuid.UUID,
 	return nil
 }
 
-// LogActivity inserts an immutable audit entry in the current Tx.
 func (r *txRepository) LogActivity(ctx context.Context, entry *models.ActivityLog) error {
 	_, err := r.tx.Exec(ctx, `
 		INSERT INTO activity_log
@@ -161,10 +166,6 @@ func (r *txRepository) LogActivity(ctx context.Context, entry *models.ActivityLo
 	return nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Repositories container
-// ─────────────────────────────────────────────────────────────────────────────
-
 // Repositories bundles all store implementations for injection into services.
 type Repositories struct {
 	User         UserStore
@@ -174,10 +175,10 @@ type Repositories struct {
 	Workflow     WorkflowStore
 	Comment      CommentStore
 	Notification NotificationStore
+	CustomField  CustomFieldStore
 	Tx           Transactor
 }
 
-// NewRepositories wires concrete implementations against the given pool.
 func NewRepositories(db *Database) *Repositories {
 	return &Repositories{
 		User:         NewUserRepository(db),
@@ -187,6 +188,7 @@ func NewRepositories(db *Database) *Repositories {
 		Workflow:     NewWorkflowRepository(db),
 		Comment:      NewCommentRepository(db),
 		Notification: NewNotificationRepository(db),
+		CustomField:  NewCustomFieldRepository(db),
 		Tx:           NewTransactor(db),
 	}
 }

@@ -63,8 +63,7 @@ func (h *IssueHandler) Delete(c *fiber.Ctx) error {
 }
 
 // POST /api/issues/:id/transitions
-// Returns 422 with allowed_transitions if the target status isn't reachable.
-// Returns 409 on optimistic lock conflict.
+// 422 if the target status isn't reachable from the current one; 409 on version conflict.
 func (h *IssueHandler) Transition(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
